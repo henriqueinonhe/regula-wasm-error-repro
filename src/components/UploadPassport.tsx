@@ -5,6 +5,94 @@ import { PassportIntent } from "../domain/PassportIntent";
 import { returnException } from "return-exception";
 import { mapRegulaResponseToPassportIntent } from "../regula/mapRegulaResponseToPassportIntent";
 
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = (event) => {
+      const base64String = event.target?.result;
+      if (typeof base64String === "string") {
+        resolve(base64String);
+      } else {
+        reject("Reader error");
+      }
+    };
+
+    reader.onerror = (error) => {
+      reject(error);
+    };
+
+    reader.readAsDataURL(file);
+  });
+}
+
+async function getImageData(
+  files: FileList | Array<Blob>,
+  resizeValue: number,
+): Promise<Array<Promise<ImageData>>> {
+  const promises: Array<Promise<ImageData>> = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const promise = new Promise<ImageData>((res, rej) => {
+      const file = Array.from(files)[i];
+
+      if (file) {
+        if (!file.size) return rej("INCORRECT_FILE");
+
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        const objURL = URL.createObjectURL(file);
+        const img = new Image();
+
+        img.onload = function () {
+          let canvasWidth = img.width;
+          let canvasHeight = img.height;
+
+          const isImageResizeNeed =
+            img.width > resizeValue || img.height > resizeValue;
+
+          if (isImageResizeNeed) {
+            const aspectRatio = img.width / img.height;
+
+            if (img.width > img.height) {
+              canvasWidth = resizeValue;
+              canvasHeight = resizeValue / aspectRatio;
+            } else {
+              canvasHeight = resizeValue;
+              canvasWidth = resizeValue * aspectRatio;
+            }
+          }
+
+          canvas.width = canvasWidth;
+          canvas.height = canvasHeight;
+
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight);
+            const imageData = ctx?.getImageData(
+              0,
+              0,
+              canvasWidth,
+              canvasHeight,
+            );
+
+            if (imageData) {
+              res(imageData);
+              URL.revokeObjectURL(objURL);
+            }
+          }
+        };
+
+        img.src = objURL;
+        img.onerror = () => rej("INCORRECT_FILE");
+      } else {
+        rej("INCORRECT_FILE");
+      }
+    });
+    promises.push(promise);
+  }
+  return promises;
+}
+
 export type UploadPassportProps = {
   onPassportUploadStart?: () => void;
   onPassportUploadFailed?: (error: unknown) => void;
@@ -71,7 +159,7 @@ export const UploadPassport = ({
         hidden
         ref={inputRef}
         accept="image/*"
-        onChange={() => handleFileSelected()}
+        onChange={handleFileSelected}
         value={inputValue}
       />
     </>
@@ -92,21 +180,22 @@ const processPassportImage = async (
   regula: DocumentReaderService,
   imageFile: File,
 ) => {
-  const arrayBuffer = await imageFile.arrayBuffer();
-  const typedArray = new Uint8Array(arrayBuffer);
-  const stringifiedTypedArray = typedArray.reduce(
-    (str, byte) => str + String.fromCharCode(byte),
-    "",
-  );
-  const imageBase64 = btoa(stringifiedTypedArray);
-
+  // Using Base64 (not recommended)
+  const imageBase64 = await fileToBase64(imageFile);
+  const rawBase64 = imageBase64.replace("data:image/jpeg;base64,", "");
   const processImage = returnException(() =>
-    regula.processImageBase64([imageBase64], {
+    regula.processImageBase64([rawBase64], {
       processParam: {
         scenario: "Mrz",
       },
     }),
   );
+
+  // Using uint (more optimal method, allows you to process larger files and works faster)
+  const promiseArray = await getImageData([new Blob([imageFile])], 1920);
+  const imagesArray = await Promise.all(promiseArray);
+  const res = await regula.processImage(imagesArray);
+  console.log("Using uint:", res);
 
   const [response, error] = await processImage();
 
